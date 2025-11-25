@@ -13,7 +13,7 @@ pub enum EchoPayload {
         node_id: String,
         node_ids: Vec<String>,
     },
-    InitOk {},
+    InitOk,
     Echo {
         echo: String,
     },
@@ -38,13 +38,13 @@ impl NodeState for EchoState {
             Self::PayloadType::Init { node_id, node_ids } => Ok(MessageResponse::Init {
                 node_id,
                 node_ids,
-                payload: Self::PayloadType::InitOk {},
+                payload: Self::PayloadType::InitOk,
             }),
             Self::PayloadType::Echo { echo } => Ok(MessageResponse::Response {
                 payload: Self::PayloadType::EchoOk { echo },
             }),
             Self::PayloadType::EchoOk { .. } => unreachable!(),
-            Self::PayloadType::InitOk {} => unreachable!(),
+            Self::PayloadType::InitOk => unreachable!(),
         }
     }
 }

@@ -1,6 +1,7 @@
 use std::io::{self, Write};
 
 use dist::{
+    broadcast::BroadcastState,
     id::IdState,
     messages::{Body, Message},
     nodes::Node,
@@ -13,6 +14,6 @@ struct Example {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let mut node: Node<IdState> = Node::init();
+    let mut node: Node<BroadcastState> = Node::init();
     node.run().await
 }
