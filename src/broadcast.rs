@@ -1,25 +1,28 @@
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    ops::Deref,
+};
 
 use serde::{Deserialize, Serialize};
 
 use crate::{
     messages::Message,
-    nodes::{MessageError, MessageResponse, NodeState},
+    nodes::{Node, NodeState},
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type")]
 #[serde(rename_all = "snake_case")]
 pub enum BroadcastPayload {
-    Init {
-        node_id: String,
-        node_ids: Vec<String>,
-    },
-    InitOk,
     Broadcast {
-        message: u32,
+        #[serde(rename = "message")]
+        msg: u32,
     },
     BroadcastOk,
+    Gossip {
+        #[serde(rename = "message")]
+        msg: u32,
+    },
     Read,
     ReadOk {
         messages: HashSet<u32>,
@@ -30,57 +33,67 @@ pub enum BroadcastPayload {
     TopologyOk,
 }
 
-pub struct BroadcastState {
+pub struct BroadcastTimer {}
+
+pub struct BroadcastNode {
+    state: NodeState<BroadcastTimer>,
     messages: HashSet<u32>,
-    node_id: String,
-    nodes_ids: Vec<String>,
 }
-impl NodeState for BroadcastState {
+impl Node for BroadcastNode {
     type PayloadType = BroadcastPayload;
+    type Timer = BroadcastTimer;
 
     fn init() -> Self {
         Self {
-            node_id: String::default(),
-            nodes_ids: Vec::default(),
+            state: NodeState::init(),
             messages: HashSet::default(),
         }
     }
 
-    fn process_message(
-        &mut self,
-        message: Message<Self::PayloadType>,
-    ) -> Result<MessageResponse<Self::PayloadType>, MessageError> {
+    fn process_message(&mut self, message: Message<Self::PayloadType>) -> anyhow::Result<()> {
         match message.body.payload {
-            Self::PayloadType::Init { node_id, node_ids } => {
-                self.node_id = node_id.clone();
-                self.nodes_ids = node_ids.clone();
-                Ok(MessageResponse::Init {
-                    node_id,
-                    node_ids,
-                    payload: Self::PayloadType::InitOk,
-                })
+            Self::PayloadType::Broadcast { msg } => {
+                self.messages.insert(msg);
+                let payload = BroadcastPayload::BroadcastOk;
+                self.write_message(payload, message.body.id, message.src)?;
+
+                let resp = BroadcastPayload::Gossip { msg };
+
+                for node in self.state.nodes_ids.clone() {
+                    if node != self.state.node_id {
+                        self.write_message(resp.clone(), None, node)?;
+                    }
+                }
             }
-            Self::PayloadType::Broadcast { message } => {
-                self.messages.insert(message);
-                Ok(MessageResponse::Response {
-                    payload: Self::PayloadType::BroadcastOk,
-                })
-            }
-            Self::PayloadType::Read => Ok(MessageResponse::Response {
-                payload: Self::PayloadType::ReadOk {
+            Self::PayloadType::Read => {
+                let payload = BroadcastPayload::ReadOk {
                     messages: self.messages.clone(),
-                },
-            }),
-            Self::PayloadType::Topology { .. } => {
-                let res = 5;
-                Ok(MessageResponse::Response {
-                    payload: Self::PayloadType::TopologyOk,
-                })
+                };
+                self.write_message(payload, message.body.id, message.src)?;
             }
-            Self::PayloadType::BroadcastOk { .. } => unreachable!(),
-            Self::PayloadType::InitOk => unreachable!(),
+            Self::PayloadType::Gossip { msg } => {
+                self.messages.insert(msg);
+            }
+            Self::PayloadType::Topology { .. } => {
+                let payload = BroadcastPayload::TopologyOk;
+                self.write_message(payload, message.body.id, message.src)?;
+            }
+            Self::PayloadType::BroadcastOk { .. } => {}
             Self::PayloadType::TopologyOk => unreachable!(),
             Self::PayloadType::ReadOk { .. } => unreachable!(),
         }
+        Ok(())
+    }
+
+    fn get_state(&self) -> &NodeState<BroadcastTimer> {
+        &self.state
+    }
+
+    fn get_state_mut(&mut self) -> &mut NodeState<BroadcastTimer> {
+        &mut self.state
+    }
+
+    fn handle_timer(&mut self, timer: Self::Timer) -> anyhow::Result<()> {
+        Ok(())
     }
 }

@@ -2,56 +2,57 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     messages::Message,
-    nodes::{MessageError, MessageResponse, NodeState},
+    nodes::{Node, NodeState},
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type")]
 #[serde(rename_all = "snake_case")]
 pub enum IdPayload {
-    Init {
-        node_id: String,
-        node_ids: Vec<String>,
-    },
-    InitOk {},
     Generate {},
-    GenerateOk {
-        id: u64,
-    },
+    GenerateOk { id: u64 },
 }
-pub struct IdState {
+pub struct IdNode {
+    state: NodeState<IdTimer>,
     current_id: u64,
 }
 
-impl NodeState for IdState {
+pub struct IdTimer {}
+
+impl Node for IdNode {
     type PayloadType = IdPayload;
+    type Timer = IdTimer;
 
     fn init() -> Self {
         Self {
+            state: NodeState::init(),
             current_id: rand::random(),
         }
     }
 
-    fn process_message(
-        &mut self,
-        message: Message<Self::PayloadType>,
-    ) -> Result<MessageResponse<Self::PayloadType>, MessageError> {
+    fn process_message(&mut self, message: Message<Self::PayloadType>) -> anyhow::Result<()> {
         match message.body.payload {
-            Self::PayloadType::Init { node_id, node_ids } => Ok(MessageResponse::Init {
-                node_id,
-                node_ids,
-                payload: Self::PayloadType::InitOk {},
-            }),
-            Self::PayloadType::Generate {} => {
+            IdPayload::Generate {} => {
                 self.current_id += 1;
-                Ok(MessageResponse::Response {
-                    payload: Self::PayloadType::GenerateOk {
-                        id: self.current_id - 1,
-                    },
-                })
+                let payload = IdPayload::GenerateOk {
+                    id: self.current_id - 1,
+                };
+                self.write_message(payload, message.body.id, message.src)?;
             }
-            Self::PayloadType::InitOk { .. } => unreachable!(),
-            Self::PayloadType::GenerateOk { .. } => unreachable!(),
+            IdPayload::GenerateOk { .. } => unreachable!(),
         }
+        Ok(())
+    }
+
+    fn get_state(&self) -> &NodeState<IdTimer> {
+        &self.state
+    }
+
+    fn get_state_mut(&mut self) -> &mut NodeState<IdTimer> {
+        &mut self.state
+    }
+
+    fn handle_timer(&mut self, timer: Self::Timer) -> anyhow::Result<()> {
+        Ok(())
     }
 }

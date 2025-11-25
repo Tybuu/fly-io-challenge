@@ -1,109 +1,152 @@
 use std::{
+    cmp::{Ordering, Reverse},
+    collections::BinaryHeap,
     fmt::{self, Debug},
     io::{StdoutLock, Write},
+    time::Duration,
 };
 
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::{
+    io::{AsyncBufReadExt, BufReader},
+    select,
+    sync::mpsc,
+    time::Instant,
+};
 
-use crate::messages::{Body, Message};
+use crate::messages::{Body, InitPayload, Message};
 
-pub trait NodeState: Sized {
-    type PayloadType: Serialize + for<'de> Deserialize<'de> + Clone + Debug;
-
-    fn init() -> Self;
-    fn process_message(
-        &mut self,
-        message: Message<Self::PayloadType>,
-    ) -> Result<MessageResponse<Self::PayloadType>, MessageError>;
+struct TimerState<T> {
+    state: T,
+    expires_at: Instant,
 }
 
-pub enum MessageResponse<P: Serialize + for<'de> Deserialize<'de> + Clone + Debug> {
-    Init {
-        node_id: String,
-        node_ids: Vec<String>,
-        payload: P,
-    },
-    Response {
-        payload: P,
-    },
-}
-
-#[derive(Debug)]
-pub struct MessageError;
-
-impl fmt::Display for MessageError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Message Error!")
+impl<T> PartialEq for TimerState<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.expires_at == other.expires_at
     }
 }
-impl std::error::Error for MessageError {}
 
-pub struct Node<S: NodeState> {
-    node_id: String,
-    nodes_ids: Vec<String>,
-    tx_id: usize,
-    stdout: StdoutLock<'static>,
-    state: S,
+impl<T> Eq for TimerState<T> {}
+
+impl<T> PartialOrd for TimerState<T> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.expires_at.cmp(&other.expires_at))
+    }
 }
 
-impl<S: NodeState> Node<S> {
-    pub fn init() -> Self {
-        Self {
-            node_id: Default::default(),
-            nodes_ids: Default::default(),
-            tx_id: Default::default(),
+impl<T> Ord for TimerState<T> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.expires_at.cmp(&other.expires_at)
+    }
+}
+
+pub struct NodeState<T> {
+    pub node_id: String,
+    pub nodes_ids: Vec<String>,
+    tx_id: usize,
+    queue: BinaryHeap<Reverse<TimerState<T>>>,
+    stdout: StdoutLock<'static>,
+}
+
+impl<T> NodeState<T> {
+    pub fn init() -> NodeState<T> {
+        NodeState {
+            node_id: String::default(),
+            nodes_ids: Vec::default(),
+            tx_id: 0,
+            queue: BinaryHeap::default(),
             stdout: std::io::stdout().lock(),
-            state: S::init(),
         }
     }
+}
 
-    pub async fn run(mut self) -> anyhow::Result<()> {
-        let stdin = tokio::io::stdin();
-        let mut reader = BufReader::new(stdin);
+pub trait Node: Sized {
+    type PayloadType: Serialize + for<'de> Deserialize<'de> + Clone + Debug;
+    type Timer;
+
+    fn init() -> Self;
+
+    fn get_state(&self) -> &NodeState<Self::Timer>;
+
+    fn get_state_mut(&mut self) -> &mut NodeState<Self::Timer>;
+
+    fn process_message(&mut self, message: Message<Self::PayloadType>) -> anyhow::Result<()>;
+
+    fn handle_timer(&mut self, timer: Self::Timer) -> anyhow::Result<()>;
+
+    fn queue_timer(&mut self, timer: Self::Timer, dur: Duration) -> anyhow::Result<()> {
+        let time = Instant::now() + dur;
+        let res = self.get_state_mut();
+        res.queue.push(Reverse(TimerState {
+            state: timer,
+            expires_at: time,
+        }));
+        Ok(())
+    }
+
+    async fn run(mut self) -> anyhow::Result<()> {
+        let (tx, mut rx) = mpsc::channel(100);
+        tokio::spawn(async move {
+            let stdin = tokio::io::stdin();
+            let mut reader = BufReader::new(stdin);
+            loop {}
+        });
         loop {
+            let min = self.get_state_mut().queue.pop();
             let mut buffer = String::new();
-            reader.read_line(&mut buffer).await?;
-            let msg: Message<S::PayloadType> = serde_json::from_str(&buffer)?;
-            let msg_id = msg.body.id;
-            let sender = msg.src.clone();
-            let resp = self.state.process_message(msg)?;
-            match resp {
-                MessageResponse::Init {
-                    node_id,
-                    node_ids,
-                    payload,
-                } => {
-                    self.node_id = node_id;
-                    self.nodes_ids = node_ids;
-                    self.tx_id = 1;
-                    self.write_message(payload, msg_id, sender)?;
+            if let Some(min) = min {
+                select! {
+                    _ = tokio::time::sleep_until(min.0.expires_at) => {
+                        self.handle_timer(min.0.state)?;
+                        continue;
+                    },
+                    _ = reader.read_line(&mut buffer) => {
+                        self.get_state_mut().queue.push(min);
+                    }
                 }
-                MessageResponse::Response { payload } => {
-                    self.write_message(payload, msg_id, sender)?;
+            }
+
+            let res = serde_json::from_str::<Message<Self::PayloadType>>(&buffer);
+            if let Ok(msg) = res {
+                self.process_message(msg)?;
+            } else if let Ok(init) = serde_json::from_str::<Message<InitPayload>>(&buffer) {
+                let state = self.get_state_mut();
+                match init.body.payload {
+                    InitPayload::Init { node_id, node_ids } => {
+                        state.node_id = node_id;
+                        state.nodes_ids = node_ids;
+                        state.tx_id = 1;
+                        let payload = InitPayload::InitOk;
+                        self.write_message(payload, init.body.id, init.src)?;
+                    }
+                    InitPayload::InitOk => {}
                 }
+            } else {
+                res?;
             }
         }
     }
 
-    fn write_message(
+    fn write_message<P: Serialize>(
         &mut self,
-        payload: S::PayloadType,
+        payload: P,
         req_id: Option<usize>,
         dst: String,
     ) -> anyhow::Result<()> {
+        let state = self.get_state_mut();
         let msg = Message {
-            src: self.node_id.clone(),
+            src: state.node_id.clone(),
             dst,
             body: Body {
-                id: Some(self.tx_id),
+                id: Some(state.tx_id),
                 req_id,
                 payload,
             },
         };
-        self.tx_id += 1;
-        serde_json::to_writer(&mut self.stdout, &msg)?;
-        self.stdout.write_all(b"\n")?;
+        state.tx_id += 1;
+        serde_json::to_writer(&mut state.stdout, &msg)?;
+        state.stdout.write_all(b"\n")?;
         Ok(())
     }
 }
