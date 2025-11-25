@@ -87,30 +87,42 @@ pub trait Node: Sized {
 
     async fn run(mut self) -> anyhow::Result<()> {
         let (tx, mut rx) = mpsc::channel(100);
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             let stdin = tokio::io::stdin();
             let mut reader = BufReader::new(stdin);
-            loop {}
+            loop {
+                let mut buf = String::new();
+                if let Ok(_) = reader.read_line(&mut buf).await {
+                    if tx.send(buf).await.is_err() {
+                        break;
+                    }
+                }
+            }
         });
         loop {
             let min = self.get_state_mut().queue.pop();
-            let mut buffer = String::new();
+            let mut buf = None;
             if let Some(min) = min {
                 select! {
                     _ = tokio::time::sleep_until(min.0.expires_at) => {
                         self.handle_timer(min.0.state)?;
                         continue;
                     },
-                    _ = reader.read_line(&mut buffer) => {
+                    buffer = rx.recv() => {
                         self.get_state_mut().queue.push(min);
+                        buf = buffer;
                     }
                 }
             }
-
-            let res = serde_json::from_str::<Message<Self::PayloadType>>(&buffer);
+            let buf = if let Some(buffer) = buf {
+                buffer
+            } else {
+                rx.recv().await.unwrap()
+            };
+            let res = serde_json::from_str::<Message<Self::PayloadType>>(&buf);
             if let Ok(msg) = res {
                 self.process_message(msg)?;
-            } else if let Ok(init) = serde_json::from_str::<Message<InitPayload>>(&buffer) {
+            } else if let Ok(init) = serde_json::from_str::<Message<InitPayload>>(&buf) {
                 let state = self.get_state_mut();
                 match init.body.payload {
                     InitPayload::Init { node_id, node_ids } => {
