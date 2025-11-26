@@ -7,6 +7,7 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 use tokio::{
     io::{AsyncBufReadExt, BufReader},
     select,
@@ -14,7 +15,10 @@ use tokio::{
     time::Instant,
 };
 
-use crate::messages::{Body, InitPayload, Message};
+use crate::{
+    messages::{Body, InitPayload, Message},
+    seqkv::SeqPayload,
+};
 
 struct TimerState<T> {
     state: T,
@@ -61,6 +65,11 @@ impl<T> NodeState<T> {
     }
 }
 
+pub enum MessageType<T> {
+    Defined(Message<T>),
+    Seq(Message<SeqPayload>),
+}
+
 pub trait Node: Sized {
     type PayloadType: Serialize + for<'de> Deserialize<'de> + Clone + Debug;
     type Timer;
@@ -71,7 +80,7 @@ pub trait Node: Sized {
 
     fn get_state_mut(&mut self) -> &mut NodeState<Self::Timer>;
 
-    fn process_message(&mut self, message: Message<Self::PayloadType>) -> anyhow::Result<()>;
+    fn process_message(&mut self, message: MessageType<Self::PayloadType>) -> anyhow::Result<()>;
 
     fn handle_timer(&mut self, timer: Self::Timer) -> anyhow::Result<()>;
 
@@ -92,10 +101,8 @@ pub trait Node: Sized {
             let mut reader = BufReader::new(stdin);
             loop {
                 let mut buf = String::new();
-                if (reader.read_line(&mut buf).await).is_ok() {
-                    if tx.send(buf).await.is_err() {
-                        break;
-                    }
+                if (reader.read_line(&mut buf).await).is_ok() && tx.send(buf).await.is_err() {
+                    break;
                 }
             }
         });
@@ -119,9 +126,21 @@ pub trait Node: Sized {
             } else {
                 rx.recv().await.unwrap()
             };
+            let values: Map<String, Value> = serde_json::from_str(&buf)?;
+            if let Some(Value::String(src)) = values.get("src") {
+                if src == "seq-kv" {
+                    let res = serde_json::from_str::<Message<SeqPayload>>(&buf);
+                    if let Ok(msg) = res {
+                        self.process_message(MessageType::Seq(msg))?;
+                    } else {
+                        res?;
+                    }
+                    continue;
+                }
+            }
             let res = serde_json::from_str::<Message<Self::PayloadType>>(&buf);
             if let Ok(msg) = res {
-                self.process_message(msg)?;
+                self.process_message(MessageType::Defined(msg))?;
             } else if let Ok(init) = serde_json::from_str::<Message<InitPayload>>(&buf) {
                 let state = self.get_state_mut();
                 match init.body.payload {
@@ -130,7 +149,7 @@ pub trait Node: Sized {
                         state.nodes_ids = node_ids;
                         state.tx_id = 1;
                         let payload = InitPayload::InitOk;
-                        self.write_message(payload, init.body.id, init.src)?;
+                        self.write_message(&payload, init.body.id, init.src)?;
                     }
                     InitPayload::InitOk => {}
                 }
@@ -142,7 +161,7 @@ pub trait Node: Sized {
 
     fn write_message<P: Serialize>(
         &mut self,
-        payload: P,
+        payload: &P,
         req_id: Option<usize>,
         dst: String,
     ) -> anyhow::Result<()> {

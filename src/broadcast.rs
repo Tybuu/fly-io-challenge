@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     messages::Message,
-    nodes::{Node, NodeState},
+    nodes::{MessageType, Node, NodeState},
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -56,38 +56,32 @@ impl Node for BroadcastNode {
         res
     }
 
-    fn process_message(&mut self, message: Message<Self::PayloadType>) -> anyhow::Result<()> {
-        match message.body.payload {
-            Self::PayloadType::Broadcast { msg } => {
-                self.messages.insert(msg);
-                let payload = BroadcastPayload::BroadcastOk;
-                self.write_message(payload, message.body.id, message.src)?;
+    fn process_message(&mut self, message: MessageType<Self::PayloadType>) -> anyhow::Result<()> {
+        if let MessageType::Defined(message) = message {
+            match message.body.payload {
+                Self::PayloadType::Broadcast { msg } => {
+                    self.messages.insert(msg);
+                    let payload = BroadcastPayload::BroadcastOk;
+                    self.write_message(&payload, message.body.id, message.src)?;
+                }
+                Self::PayloadType::Read => {
+                    let payload = BroadcastPayload::ReadOk {
+                        messages: self.messages.clone(),
+                    };
+                    self.write_message(&payload, message.body.id, message.src)?;
+                }
+                Self::PayloadType::Gossip { msg } => {
+                    self.messages.extend(msg);
+                    // self.write_message(payload, message.body.id, message.src)?;
+                }
+                Self::PayloadType::Topology { .. } => {
+                    let payload = BroadcastPayload::TopologyOk;
+                    self.write_message(&payload, message.body.id, message.src)?;
+                }
+                Self::PayloadType::BroadcastOk { .. } => {}
+                Self::PayloadType::TopologyOk => unreachable!(),
+                Self::PayloadType::ReadOk { .. } => unreachable!(),
             }
-            Self::PayloadType::Read => {
-                let payload = BroadcastPayload::ReadOk {
-                    messages: self.messages.clone(),
-                };
-                self.write_message(payload, message.body.id, message.src)?;
-            }
-            Self::PayloadType::Gossip { msg } => {
-                self.messages.extend(msg);
-                // self.write_message(payload, message.body.id, message.src)?;
-            }
-            // Self::PayloadType::GossipOk { msg } => {
-            //     if let Some(set) = self.need_to_send.get_mut(&msg) {
-            //         set.remove(&message.src);
-            //         if set.is_empty() {
-            //             self.need_to_send.remove(&msg);
-            //         }
-            //     }
-            // }
-            Self::PayloadType::Topology { .. } => {
-                let payload = BroadcastPayload::TopologyOk;
-                self.write_message(payload, message.body.id, message.src)?;
-            }
-            Self::PayloadType::BroadcastOk { .. } => {}
-            Self::PayloadType::TopologyOk => unreachable!(),
-            Self::PayloadType::ReadOk { .. } => unreachable!(),
         }
         Ok(())
     }

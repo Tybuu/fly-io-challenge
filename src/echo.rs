@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     messages::Message,
-    nodes::{Node, NodeState},
+    nodes::{MessageType, Node, NodeState},
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -32,13 +32,15 @@ impl Node for EchoNode {
         Ok(())
     }
 
-    fn process_message(&mut self, message: Message<Self::PayloadType>) -> anyhow::Result<()> {
-        match message.body.payload {
-            EchoPayload::Echo { echo } => {
-                let payload = EchoPayload::EchoOk { echo };
-                self.write_message(payload, message.body.id, message.src)?;
+    fn process_message(&mut self, message: MessageType<Self::PayloadType>) -> anyhow::Result<()> {
+        if let MessageType::Defined(message) = message {
+            match message.body.payload {
+                EchoPayload::Echo { echo } => {
+                    let payload = EchoPayload::EchoOk { echo };
+                    self.write_message(&payload, message.body.id, message.src)?;
+                }
+                Self::PayloadType::EchoOk { .. } => unreachable!(),
             }
-            Self::PayloadType::EchoOk { .. } => unreachable!(),
         }
         Ok(())
     }

@@ -2,6 +2,7 @@ use std::io::{self, Write};
 
 use dist::{
     broadcast::BroadcastNode,
+    counter::CounterNode,
     echo::EchoNode,
     id::IdNode,
     messages::{Body, Message},
@@ -15,6 +16,6 @@ struct Example {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let mut node = BroadcastNode::init();
+    let mut node = CounterNode::init();
     node.run().await
 }
