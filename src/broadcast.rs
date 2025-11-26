@@ -1,9 +1,12 @@
 use std::{
     collections::{HashMap, HashSet},
+    mem::take,
     ops::Deref,
     time::Duration,
 };
 
+const TIMER_DURATION: Duration = Duration::from_millis(100);
+use rand::seq::SliceRandom;
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -22,10 +25,7 @@ pub enum BroadcastPayload {
     BroadcastOk,
     Gossip {
         #[serde(rename = "message")]
-        msg: u32,
-    },
-    GossipOk {
-        msg: u32,
+        msg: HashSet<u32>,
     },
     Read,
     ReadOk {
@@ -37,45 +37,31 @@ pub enum BroadcastPayload {
     TopologyOk,
 }
 
-pub struct BroadcastTimer {
-    msg: u32,
-}
+pub struct BroadcastTimer {}
 
 pub struct BroadcastNode {
     state: NodeState<BroadcastTimer>,
     messages: HashSet<u32>,
-    need_to_send: HashMap<u32, HashSet<String>>,
 }
 impl Node for BroadcastNode {
     type PayloadType = BroadcastPayload;
     type Timer = BroadcastTimer;
 
     fn init() -> Self {
-        Self {
+        let mut res = Self {
             state: NodeState::init(),
             messages: HashSet::default(),
-            need_to_send: HashMap::default(),
-        }
+        };
+        res.queue_timer(BroadcastTimer {}, TIMER_DURATION);
+        res
     }
 
     fn process_message(&mut self, message: Message<Self::PayloadType>) -> anyhow::Result<()> {
         match message.body.payload {
             Self::PayloadType::Broadcast { msg } => {
+                self.messages.insert(msg);
                 let payload = BroadcastPayload::BroadcastOk;
                 self.write_message(payload, message.body.id, message.src)?;
-
-                let resp = BroadcastPayload::Gossip { msg };
-                if self.messages.insert(msg) {
-                    let mut nodes = HashSet::new();
-                    for node in self.state.nodes_ids.clone() {
-                        if node != self.state.node_id {
-                            nodes.insert(node.clone());
-                            self.write_message(resp.clone(), None, node)?;
-                        }
-                    }
-                    self.need_to_send.insert(msg, nodes);
-                    self.queue_timer(BroadcastTimer { msg }, Duration::from_millis(100))?;
-                }
             }
             Self::PayloadType::Read => {
                 let payload = BroadcastPayload::ReadOk {
@@ -84,18 +70,17 @@ impl Node for BroadcastNode {
                 self.write_message(payload, message.body.id, message.src)?;
             }
             Self::PayloadType::Gossip { msg } => {
-                self.messages.insert(msg);
-                let payload = BroadcastPayload::GossipOk { msg };
-                self.write_message(payload, message.body.id, message.src)?;
+                self.messages.extend(msg);
+                // self.write_message(payload, message.body.id, message.src)?;
             }
-            Self::PayloadType::GossipOk { msg } => {
-                if let Some(set) = self.need_to_send.get_mut(&msg) {
-                    set.remove(&message.src);
-                    if set.is_empty() {
-                        self.need_to_send.remove(&msg);
-                    }
-                }
-            }
+            // Self::PayloadType::GossipOk { msg } => {
+            //     if let Some(set) = self.need_to_send.get_mut(&msg) {
+            //         set.remove(&message.src);
+            //         if set.is_empty() {
+            //             self.need_to_send.remove(&msg);
+            //         }
+            //     }
+            // }
             Self::PayloadType::Topology { .. } => {
                 let payload = BroadcastPayload::TopologyOk;
                 self.write_message(payload, message.body.id, message.src)?;
@@ -116,16 +101,24 @@ impl Node for BroadcastNode {
     }
 
     fn handle_timer(&mut self, timer: Self::Timer) -> anyhow::Result<()> {
-        if let Some(set) = self.need_to_send.get_mut(&timer.msg) {
-            let resp = BroadcastPayload::Gossip { msg: timer.msg };
-            for node in set.clone() {
-                self.write_message(resp.clone(), None, node)?;
+        let mut rand = rand::rng();
+        let mut nodes = self.state.nodes_ids.clone();
+        nodes.shuffle(&mut rand);
+        let mut i = 0;
+        let resp = BroadcastPayload::Gossip {
+            msg: take(&mut self.messages),
+        };
+        for node in nodes {
+            if i >= 4 {
+                break;
             }
-            self.queue_timer(
-                BroadcastTimer { msg: timer.msg },
-                Duration::from_millis(100),
-            )?;
+            self.write_message(&resp, None, node)?;
+            i += 1;
         }
+        if let BroadcastPayload::Gossip { msg } = resp {
+            self.messages = msg;
+        }
+        self.queue_timer(BroadcastTimer {}, TIMER_DURATION)?;
         Ok(())
     }
 }

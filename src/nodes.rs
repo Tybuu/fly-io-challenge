@@ -92,7 +92,7 @@ pub trait Node: Sized {
             let mut reader = BufReader::new(stdin);
             loop {
                 let mut buf = String::new();
-                if let Ok(_) = reader.read_line(&mut buf).await {
+                if (reader.read_line(&mut buf).await).is_ok() {
                     if tx.send(buf).await.is_err() {
                         break;
                     }
